@@ -22,6 +22,7 @@ def displayHelp():
   print("                            [ -f <filename> ]")
   print("                            [ -u <username> ]")
   print("                            [ -p <password> ]")
+  print("                            [ -t <timeout>  ]")
   sys.exit(1)
 
 # Print executions report
@@ -31,23 +32,6 @@ def printReport(report):
      print('{} - {}'.format(host,report[host]))
    return True
 
-def queueThread(kwargs,th_number):
-  host = kwargs.get('host','localhost')
-  #set up the queue to hold all the urls
-  q = Queue(maxsize=0)
-  for myhost in host:
-    q.put(myhost)
-  for i in range(th_number):
-    LOG.debug('Starting thread %i', i)
-    worker = threading.Thread(target=powerRedundancy, args=(q,kwargs.get('user','root'),kwargs.get('password','calvin')))
-    worker.setDaemon(True)    #setting threads as "daemon" allows main program to 
-                              #exit eventually even if these dont finish correctly 
-    worker.start()
-   #wait until the queue has been processed
-  q.join()
-  LOG.debug('All threads completed.')   
-  if len(host) > 0 :
-    printReport(report)
 
 # When file is specified
 def withFile(kwargs):
@@ -60,7 +44,8 @@ def withFile(kwargs):
   # Use many threads (50 max, or one for each url)
   myhost = list()
   for line in liste:
-    match1 = re.search(r"\w+\s\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",line)
+#    match1 = re.search(r"\w+\s\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",line)
+    match1 = re.search(r"\w+",line)
     match2 = re.search(r"\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}",line)
     if match1 or match2: 
       myhost.append(line.split()[len(line.split())-1])
@@ -77,6 +62,24 @@ def withArg(kwargs):
   num_threads = min(50, len(kwargs['host']))
   queueThread(kwargs,num_threads)
     
+def queueThread(kwargs,th_number):
+  host = kwargs.get('host','localhost')
+  #set up the queue to hold all the urls
+  q = Queue(maxsize=0)
+  for myhost in host:
+    q.put(myhost)
+  for i in range(th_number):
+    LOG.debug('Starting thread %i', i)
+    worker = threading.Thread(target=powerRedundancy, args=(q,kwargs))
+    worker.setDaemon(True)    #setting threads as "daemon" allows main program to 
+                              #exit eventually even if these dont finish correctly 
+    worker.start()
+   #wait until the queue has been processed
+  q.join()
+  LOG.debug('All threads completed.')   
+  if len(host) > 0 :
+    printReport(report)
+
 def CallbackTimeout(p):
   if p.poll() is None:
     p.kill()
@@ -87,35 +90,38 @@ def CallbackTimeout(p):
       return error.split("\n")[0]
     return output.split("\r")[4]
 
-# Change power config via racadm
-def powerRedundancy(q,*args):
+def racadmwrap(cmdline,cmd,timeout,work):
+  report[work]=list()
+  for raccmd in cmd:
+    try:
+      p=subprocess.Popen(shlex.split("{} {}".format(cmdline,raccmd)),stdout = subprocess.PIPE, stderr= subprocess.PIPE)
+      time.sleep(timeout)
+      if re.search(r"get\s",raccmd):
+        report[work].append(CallbackTimeout(p))
+      else:
+        LOG.info(CallbackTimeout(p))
+    except Exception as e:
+      LOG.error("{} {}".format(work,e))
+
+def powerRedundancy(q,kwargs):
    while not q.empty():
      work = q.get() 
-     myuser,mypass=args[0],args[1]
-     if socket.gethostbyname(work):
-         cmd=shlex.split(racadm +" -r " + work + " -u " + myuser + " -p " + mypass + " set system.power.RedundancyPolicy 1")
-         p=subprocess.Popen(cmd,stdout = subprocess.PIPE, stderr= subprocess.PIPE)
-         time.sleep(10)
-         output=CallbackTimeout(p)
-         LOG.debug("OUTPUT for {} is {}".format(work,output))
-         LOG.info("{} {} {}".format(work,myuser,mypass))
-         cmd=shlex.split(racadm +" -r " + work + " -u " + myuser + " -p " + mypass + " get system.power.RedundancyPolicy")
-         p=subprocess.Popen(cmd,stdout = subprocess.PIPE, stderr= subprocess.PIPE)
-         time.sleep(10)
-         report[work]=CallbackTimeout(p)
-     else:
-       LOG.error("Error, host "+ work +" not resolved")
+     cmd=['set system.power.RedundancyPolicy 0','get system.power.RedundancyPolicy','set System.Power.PFCEnable 1','get System.Power.PFCEnable']
+     try:
+       ip = socket.gethostbyname(work)
+       cmdline="{} -r {} -u {} -p {}".format(racadm,ip,kwargs.get('user','root'),kwargs.get('password','calvin'))
+       racadmwrap(cmdline,cmd,kwargs.get('timeout',10),work)
+     except Exception as e: 
+       LOG.error("{} {}".format(work,e))
      q.task_done()
 
 if __name__ == '__main__':
-
   FNULL = open(os.devnull, 'w')
-  if subprocess.check_call(['/usr/bin/which','racadm'],stdout=FNULL) != 0:
-      LOG.error("Error, racadm introuvable dans le path")
-      LOG.error("Maybe PATH=$PATH:/opt/dell/srvadmin could help")
+  try:
+      racadm = subprocess.check_output(['/usr/bin/find','/opt/dell/srvadmin/bin','-name','*racadm*']).split('\n')[0]
+  except Exception as e: 
+      LOG.error("Error, racadm exec not found in /opt/dell/srvadmin/bin {}".format(e))
       sys.exit(1)
-  else: 
-      racadm = subprocess.check_output(['/usr/bin/which','racadm']).split('\n')[0]
   args = {}
   report = {}
   i=1
@@ -135,6 +141,8 @@ if __name__ == '__main__':
        args['user'] = sys.argv[i+1]
      elif sys.argv[i] == '-p': 
        args['password'] = sys.argv[i+1]
+     elif sys.argv[i] == '-t': 
+       args['timeout'] = float(sys.argv[i+1])
      else:
         displayHelp()
      i=i+2
