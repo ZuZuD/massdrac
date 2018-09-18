@@ -5,7 +5,7 @@ from logging.handlers import RotatingFileHandler
 
 logger = logging.getLogger()
 
-# set logger level to debug to print everything 
+# set logger level to debug
 logger.setLevel(logging.DEBUG)
 
 formatter = logging.Formatter('%(asctime)s :: %(levelname)s :: %(message)s')
